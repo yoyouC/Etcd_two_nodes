@@ -2,53 +2,97 @@ import socket
 import threading
 import server
 from message import *
+import sys, os
+import subprocess
+import time
+import tracker
 
+class EtcdHA():
+    def __init__(self, serverPort, sendPort):
+        self.sendPort = sendPort
+        self.serverPort = serverPort
+        self.tracker = tracker.ProgressTracker()
+        self.msgHandler = server.MsgHandler(self.tracker)
 
-def send(socket, data):
-    socket.send(data.encode('utf-8'))
+    def sendMsg(self, msg):
+        s = socket.socket()
+        host = socket.gethostname()
+        s.connect((host, self.sendPort))
+        server.send(s, msg.serialize())
+        return s
 
-def recieve(conn):
-    data = conn.recv(1024)
-    return data.decode()
-    
-def startServer(port):
-    s = socket.socket()
-    host = socket.gethostname()
-    s.bind((host, port))        
+    def startEtcd(self):
+        return subprocess.Popen(["C:\\Users\\c50014277\\Documents\\etcd-release-3.4\\bin\\etcd"])
 
-    s.listen(5)                 
-    while True:
-        c, addr = s.accept()     
-        data = recieve(c)
-        server.handleReq(c, data)
-        c.close()                
-    
-def startMonitor(port):
-    while True:
-        try:
-            s = socket.socket()
-            host = socket.gethostname()
-            s.connect((host, port))
+    def sendHeartBeat(self, isRunning):
 
-            msg = Message(MessageType.Ready)
-            send(s, msg.serialize())
+        if isRunning:
+            content = HeartBeatContent(EtcdState.EtcdOK, time.time())
+        else:
+            content = HeartBeatContent(EtcdState.EtcdDown, time.time())
 
-            response = s.recv(1024)
-            print(response.decode())
+        heartBeatMsg = Message(MessageType.HeartBeat, content)
+        self.sendMsg(heartBeatMsg)
 
-            s.close()
-            break
-        except ConnectionRefusedError:
-            print("Connection refused by", host, port)
+    def startMonitoring(self, process):
+        while True:
+            isRunning = False
+            if process.poll() == None:
+                isRunning = True
 
-     
+            self.sendHeartBeat(isRunning)
+            time.sleep(1)
 
-def startHA(selfport, otherport):
-    serverT = threading.Thread(target=startServer, args=(selfport,))
-    MonitorT = threading.Thread(target=startMonitor, args=(otherport,))
-    serverT.start()
-    MonitorT.start()
+    def waitForTheOther(self):
+        while True:
+            try:
+                s = socket.socket()
+                host = socket.gethostname()
+                s.connect((host, self.sendPort))
+
+                msg = Message(MessageType.Ready)
+                server.send(s, msg.serialize())
+
+                responseText = s.recv(1024)
+                response = deserializeMsg(responseText)
+                if response.type == MessageType.ReadyResp.value:
+                    s.close()
+                    break
+            except ConnectionRefusedError:
+                print("Connection refused by", host, self.sendPort)
+
+    def startServer(self):
+        s = socket.socket()
+        host = socket.gethostname()
+        s.bind((host, self.serverPort))
+
+        s.listen(5)
+        while True:
+            c, addr = s.accept()
+            data = server.recieve(c)
+            self.msgHandler.handleReq(c, data)
+            c.close()
+
+    def startMonitor(self):
+        self.waitForTheOther()
+        process = self.startEtcd()
+        self.startMonitoring(process)
+
+    def start(self):
+        serverT = threading.Thread(target=self.startServer)
+        MonitorT = threading.Thread(target=self.startMonitor)
+        serverT.start()
+        MonitorT.start()
 
 
 if __name__ == "__main__":
-    startHA(12345, 12345)
+    etcdHA = None
+
+    if len(sys.argv) > 1:
+        serverPort = sys.argv[1]
+        otherPort = sys.argv[2]
+        etcdHA = EtcdHA(serverPort, otherPort)
+    else:
+        etcdHA = EtcdHA(12345, 12345)
+
+    etcdHA.start()
