@@ -1,4 +1,6 @@
 from message import *
+import socket
+from util import recieve
 
 def handleReq(conn, data):
     response = ""
@@ -12,3 +14,16 @@ def handleReq(conn, data):
     
     if response != "":
         conn.send(response.encode())
+
+
+def startServer(port):
+    s = socket.socket()
+    host = socket.gethostname()
+    s.bind((host, port))
+
+    s.listen(5)
+    while True:
+        c, addr = s.accept()
+        data = recieve(c)
+        handleReq(c, data)
+        c.close()
